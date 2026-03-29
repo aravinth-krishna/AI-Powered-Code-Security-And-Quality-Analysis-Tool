@@ -96,12 +96,26 @@ export default function SettingsPage() {
 
   const deleteAllScans = async () => {
     setDeleting(true);
-    for (const scan of scans) {
-      await fetch(`/api/scans/${scan.id}`, { method: "DELETE" });
+    try {
+      const res = await fetch("/api/scans", { method: "DELETE" });
+      const data = await res.json();
+
+      if (!res.ok) {
+        setMessage({
+          type: "error",
+          text: data.error || "Failed to delete scan history",
+        });
+        return;
+      }
+
+      setScans([]);
+      setDeleteConfirm(false);
+      setMessage({ type: "success", text: "All scan history deleted" });
+    } catch {
+      setMessage({ type: "error", text: "Failed to delete scan history" });
+    } finally {
+      setDeleting(false);
     }
-    setScans([]);
-    setDeleteConfirm(false);
-    setDeleting(false);
   };
 
   // Stats

@@ -1,0 +1,90 @@
+/* ── File Tree Component ── */
+
+.fileTree {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.5rem;
+  font-size: 0.8rem;
+  font-family: var(--font-mono);
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.fileTree::-webkit-scrollbar {
+  width: 6px;
+}
+
+.fileTree::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.fileTree::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+}
+
+.fileTree::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.folderItem,
+.fileItem {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0.4rem;
+  cursor: pointer;
+  user-select: none;
+  border-radius: 4px;
+  transition: all 0.15s;
+  color: var(--text-secondary);
+}
+
+.folderItem:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-primary);
+}
+
+.fileItem:hover {
+  background: rgba(99, 102, 241, 0.08);
+  color: var(--accent);
+}
+
+.fileItem.selected {
+  background: rgba(99, 102, 241, 0.15);
+  color: var(--accent);
+  border-left: 2px solid var(--accent);
+  padding-left: 0.2rem;
+}
+
+.chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  min-width: 16px;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+
+.folderIcon,
+.fileIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  min-width: 14px;
+  font-size: 12px;
+}
+
+.folderName,
+.fileName {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 0.75rem;
+}

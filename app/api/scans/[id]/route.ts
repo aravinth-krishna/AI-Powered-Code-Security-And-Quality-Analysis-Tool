@@ -44,8 +44,11 @@ export async function DELETE(
     return NextResponse.json({ error: "Scan not found" }, { status: 404 });
   }
 
-  await prisma.issue.deleteMany({ where: { scanId: id } });
-  await prisma.scan.delete({ where: { id } });
+  await prisma.$transaction(async (tx) => {
+    await tx.versionScan.deleteMany({ where: { scanId: id } });
+    await tx.issue.deleteMany({ where: { scanId: id } });
+    await tx.scan.delete({ where: { id } });
+  });
 
   return NextResponse.json({ success: true });
 }

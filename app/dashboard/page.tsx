@@ -3,6 +3,8 @@ import { useState, useRef, useCallback } from "react";
 import dynamic from "next/dynamic";
 import styles from "./scanner.module.css";
 import dashStyles from "./dashboard.module.css";
+import { downloadCSV, downloadPDF } from "@/lib/export";
+import { FileTree, FileNode } from "@/app/components/FileTree";
 import {
   IconZap,
   IconShield,
@@ -33,6 +35,7 @@ const CodeEditor = dynamic(() => import("@/app/components/CodeEditor"), {
 });
 
 type InputMode = "editor" | "upload" | "github";
+type ScanScope = "file" | "project";
 
 type IssueCategory =
   | "security"
@@ -53,9 +56,14 @@ interface Issue {
   snippet: string;
   aiExplanation?: string;
   aiFixSnippet?: string;
+  status?: "OPEN" | "FIXED" | "IGNORED";
 }
 
 interface ScanResult {
+  id: string;
+  projectName: string;
+  createdAt: string;
+  analysisMode?: string;
   securityScore: number;
   issues: Issue[];
 }
@@ -64,6 +72,15 @@ interface UploadedFile {
   name: string;
   content: string;
   size: number;
+}
+
+interface ScanContext {
+  language: string;
+  framework: string;
+  analysisMode: string;
+  fileName: string;
+  scanScope: ScanScope;
+  scannedFilesCount: number;
 }
 
 const LANGUAGES = [
@@ -208,8 +225,12 @@ export default function ScannerPage() {
   const [language, setLanguage] = useState("Java");
   const [framework, setFramework] = useState("None");
   const [analysisMode, setAnalysisMode] = useState("standard");
+  const [scanScope, setScanScope] = useState<ScanScope>("file");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<ScanResult | null>(null);
+  const [lastScanContext, setLastScanContext] = useState<ScanContext | null>(
+    null,
+  );
   const [activeCategory, setActiveCategory] = useState<IssueCategory | "all">(
     "all",
   );
@@ -222,9 +243,13 @@ export default function ScannerPage() {
   const [activeFileIdx, setActiveFileIdx] = useState(0);
   const [isDragOver, setIsDragOver] = useState(false);
   const [githubUrl, setGithubUrl] = useState("");
+  const [storedGithubUrl, setStoredGithubUrl] = useState("");
   const [githubLoading, setGithubLoading] = useState(false);
   const [githubError, setGithubError] = useState("");
   const [expandedIssues, setExpandedIssues] = useState<Set<string>>(new Set());
+  const [issueStatuses, setIssueStatuses] = useState<Record<string, string>>(
+    {},
+  );
   const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(
     new Set(),
   );
@@ -243,62 +268,263 @@ export default function ScannerPage() {
     return CODE_EXTENSIONS.has(ext);
   };
 
-  const handleFileUpload = useCallback(async (files: FileList | File[]) => {
-    const newFiles: UploadedFile[] = [];
-    for (const file of Array.from(files)) {
-      if (file.name.endsWith(".zip")) {
-        // Use JSZip to extract zip files
-        try {
-          const { default: JSZip } = await import("jszip");
-          const arrayBuf = await file.arrayBuffer();
-          const zip = await JSZip.loadAsync(arrayBuf);
-          const entries = Object.values(zip.files).filter(
-            (f) => !f.dir && isCodeFile(f.name),
-          );
-          for (const entry of entries.slice(0, 50)) {
-            const content = await entry.async("text");
-            newFiles.push({
-              name: entry.name.split("/").pop() || entry.name,
-              content,
-              size: content.length,
-            });
+  const getBaseName = (path: string) => path.split("/").pop() || path;
+
+  const isConfigLikeFile = (name: string) => {
+    const base = getBaseName(name).toLowerCase();
+    return [
+      "package.json",
+      "requirements.txt",
+      "pyproject.toml",
+      "pom.xml",
+      "go.mod",
+      "gemfile",
+      ".env",
+      "dockerfile",
+    ].includes(base);
+  };
+
+  const pickPrimaryFileIndex = (files: UploadedFile[]): number => {
+    const extPriority = [
+      "ts",
+      "tsx",
+      "js",
+      "jsx",
+      "py",
+      "java",
+      "go",
+      "rs",
+      "php",
+      "cpp",
+      "c",
+      "h",
+      "hpp",
+    ];
+
+    // Prefer source files over config-like files.
+    for (const ext of extPriority) {
+      const idx = files.findIndex((f) => {
+        const base = getBaseName(f.name).toLowerCase();
+        const fileExt = base.split(".").pop() || "";
+        return fileExt === ext && !isConfigLikeFile(base);
+      });
+      if (idx >= 0) return idx;
+    }
+
+    return 0;
+  };
+
+  const detectLanguageByExtension = (name: string): string | null => {
+    const ext = name.split(".").pop()?.toLowerCase() || "";
+    const langMap: Record<string, string> = {
+      java: "Java",
+      js: "JavaScript",
+      jsx: "JavaScript",
+      mjs: "JavaScript",
+      cjs: "JavaScript",
+      ts: "TypeScript",
+      tsx: "TypeScript",
+      py: "Python",
+      c: "C/C++",
+      cpp: "C/C++",
+      h: "C/C++",
+      hpp: "C/C++",
+      go: "Go",
+      rs: "Rust",
+      php: "PHP",
+    };
+    return langMap[ext] || null;
+  };
+
+  const detectLanguageByContent = (content: string): string | null => {
+    const src = content.slice(0, 6000);
+    if (
+      /\bimport\s+type\b|:\s*[A-Z][A-Za-z0-9_<>\[\]|]+\b|\breadonly\b/.test(src)
+    ) {
+      return "TypeScript";
+    }
+    if (/\bconst\b|\blet\b|\bfunction\b|=>|\bimport\b|\bexport\b/.test(src)) {
+      return "JavaScript";
+    }
+    if (
+      /\binterface\s+\w+\b|:\s*(string|number|boolean)\b|\btype\s+\w+\s*=/.test(
+        src,
+      )
+    ) {
+      return "TypeScript";
+    }
+    if (
+      /\bimport\s+React\b|from\s+["']react["']|module\.exports|require\(/.test(
+        src,
+      )
+    ) {
+      return "JavaScript";
+    }
+    if (/\bdef\s+\w+\(|\bimport\s+\w+|from\s+\w+\s+import\s+\w+/.test(src)) {
+      return "Python";
+    }
+    if (
+      /\bpackage\s+[\w.]+;|\bpublic\s+class\s+\w+|\bimport\s+java\./.test(src)
+    ) {
+      return "Java";
+    }
+    if (/\bpackage\s+main\b|\bfunc\s+\w+\(/.test(src)) {
+      return "Go";
+    }
+    if (/\bfn\s+\w+\(|\bimpl\s+\w+/.test(src)) {
+      return "Rust";
+    }
+    if (/<\?php|\becho\s+\$|\bfunction\s+\w+\s*\(\s*\$/.test(src)) {
+      return "PHP";
+    }
+    return null;
+  };
+
+  const detectFrameworkByFiles = (
+    detectedLanguage: string,
+    primaryContent: string,
+    files: UploadedFile[],
+  ): string => {
+    const byBase = (base: string) =>
+      files.find(
+        (f) => getBaseName(f.name).toLowerCase() === base.toLowerCase(),
+      )?.content || "";
+
+    const packageJson = byBase("package.json");
+    if (packageJson) {
+      try {
+        const pkg = JSON.parse(packageJson);
+        const deps = {
+          ...(pkg.dependencies || {}),
+          ...(pkg.devDependencies || {}),
+        } as Record<string, string>;
+        if (deps.next) return "Next.js";
+        if (deps.nestjs || deps["@nestjs/core"]) return "NestJS";
+        if (deps.express) return "Express";
+        if (deps.react) return "React";
+        if (deps.vue) return "Vue";
+        if (deps.angular || deps["@angular/core"]) return "Angular";
+        if (detectedLanguage === "JavaScript") return "Node.js";
+      } catch {
+        // Keep heuristic fallback below.
+      }
+    }
+
+    const requirements =
+      byBase("requirements.txt") + "\n" + byBase("pyproject.toml");
+    if (/\bfastapi\b/i.test(requirements)) return "FastAPI";
+    if (/\bdjango\b/i.test(requirements)) return "Django";
+    if (/\bflask\b/i.test(requirements)) return "Flask";
+
+    const pomXml = byBase("pom.xml");
+    if (/spring-boot|org\.springframework/i.test(pomXml)) return "Spring Boot";
+    if (/jakarta\.|javax\./i.test(pomXml)) return "Jakarta EE";
+
+    const goMod = byBase("go.mod");
+    if (/github\.com\/gin-gonic\/gin/i.test(goMod)) return "Gin";
+    if (/github\.com\/labstack\/echo/i.test(goMod)) return "Echo";
+    if (/github\.com\/gofiber\/fiber/i.test(goMod)) return "Fiber";
+
+    if (
+      detectedLanguage === "TypeScript" ||
+      detectedLanguage === "JavaScript"
+    ) {
+      if (/from\s+["']next\//.test(primaryContent)) return "Next.js";
+      if (/from\s+["']@nestjs\//.test(primaryContent)) return "NestJS";
+      if (/from\s+["']express["']/.test(primaryContent)) return "Express";
+      if (/from\s+["']react["']/.test(primaryContent)) return "React";
+      if (/from\s+["']vue["']/.test(primaryContent)) return "Vue";
+      if (/from\s+["']@angular\//.test(primaryContent)) return "Angular";
+      if (detectedLanguage === "JavaScript") return "Node.js";
+    }
+
+    if (detectedLanguage === "Java") {
+      if (/org\.springframework/i.test(primaryContent)) return "Spring Boot";
+      if (/jakarta\.|javax\./i.test(primaryContent)) return "Jakarta EE";
+    }
+
+    if (detectedLanguage === "Python") {
+      if (
+        /\bfrom\s+fastapi\s+import|\bimport\s+fastapi\b/i.test(primaryContent)
+      )
+        return "FastAPI";
+      if (/\bfrom\s+django\b|\bimport\s+django\b/i.test(primaryContent))
+        return "Django";
+      if (/\bfrom\s+flask\b|\bimport\s+flask\b/i.test(primaryContent))
+        return "Flask";
+    }
+
+    return "None";
+  };
+
+  const autoDetectFromFile = (
+    file: UploadedFile,
+    files: UploadedFile[],
+  ): { language: string; framework: string } => {
+    const languageDetected =
+      detectLanguageByExtension(file.name) ||
+      detectLanguageByContent(file.content) ||
+      "Java";
+
+    const frameworkDetected = detectFrameworkByFiles(
+      languageDetected,
+      file.content,
+      files,
+    );
+
+    const availableFrameworks = FRAMEWORKS[languageDetected] || ["None"];
+    return {
+      language: languageDetected,
+      framework: availableFrameworks.includes(frameworkDetected)
+        ? frameworkDetected
+        : "None",
+    };
+  };
+
+  const handleFileUpload = useCallback(
+    async (files: FileList | File[]) => {
+      const newFiles: UploadedFile[] = [];
+      for (const file of Array.from(files)) {
+        if (file.name.endsWith(".zip")) {
+          // Use JSZip to extract zip files
+          try {
+            const { default: JSZip } = await import("jszip");
+            const arrayBuf = await file.arrayBuffer();
+            const zip = await JSZip.loadAsync(arrayBuf);
+            const entries = Object.values(zip.files).filter(
+              (f) => !f.dir && isCodeFile(f.name),
+            );
+            for (const entry of entries.slice(0, 50)) {
+              const content = await entry.async("text");
+              newFiles.push({
+                name: entry.name,
+                content,
+                size: content.length,
+              });
+            }
+          } catch {
+            // Fallback: treat as single file
+            const text = await readFileAsText(file);
+            newFiles.push({ name: file.name, content: text, size: file.size });
           }
-        } catch {
-          // Fallback: treat as single file
+        } else if (isCodeFile(file.name)) {
           const text = await readFileAsText(file);
           newFiles.push({ name: file.name, content: text, size: file.size });
         }
-      } else if (isCodeFile(file.name)) {
-        const text = await readFileAsText(file);
-        newFiles.push({ name: file.name, content: text, size: file.size });
       }
-    }
-    if (newFiles.length > 0) {
-      setUploadedFiles(newFiles);
-      setActiveFileIdx(0);
-      // Auto-fill from first file
-      setCode(newFiles[0].content);
-      setFileName(newFiles[0].name);
-      // Detect language from extension
-      const ext = newFiles[0].name.split(".").pop()?.toLowerCase();
-      const langMap: Record<string, string> = {
-        java: "Java",
-        js: "JavaScript",
-        jsx: "JavaScript",
-        ts: "TypeScript",
-        tsx: "TypeScript",
-        py: "Python",
-        c: "C/C++",
-        cpp: "C/C++",
-        h: "C/C++",
-        hpp: "C/C++",
-        go: "Go",
-        rs: "Rust",
-        php: "PHP",
-      };
-      if (ext && langMap[ext]) setLanguage(langMap[ext]);
-    }
-  }, []);
+      if (newFiles.length > 0) {
+        const initialIdx = pickPrimaryFileIndex(newFiles);
+        setUploadedFiles(newFiles);
+        setActiveFileIdx(initialIdx);
+        setCode(newFiles[initialIdx].content);
+        setFileName(newFiles[initialIdx].name);
+        const detection = autoDetectFromFile(newFiles[initialIdx], newFiles);
+        setLanguage(detection.language);
+        setFramework(detection.framework);
+      }
+    },
+    [autoDetectFromFile],
+  );
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
@@ -318,24 +544,18 @@ export default function ScannerPage() {
   const handleDragLeave = useCallback(() => setIsDragOver(false), []);
 
   const selectUploadedFile = (idx: number) => {
+    if (idx < 0 || idx >= uploadedFiles.length) return;
     setActiveFileIdx(idx);
     setCode(uploadedFiles[idx].content);
     setFileName(uploadedFiles[idx].name);
-    const ext = uploadedFiles[idx].name.split(".").pop()?.toLowerCase();
-    const langMap: Record<string, string> = {
-      java: "Java",
-      js: "JavaScript",
-      jsx: "JavaScript",
-      ts: "TypeScript",
-      tsx: "TypeScript",
-      py: "Python",
-      c: "C/C++",
-      cpp: "C/C++",
-      go: "Go",
-      rs: "Rust",
-      php: "PHP",
-    };
-    if (ext && langMap[ext]) setLanguage(langMap[ext]);
+    const detection = autoDetectFromFile(uploadedFiles[idx], uploadedFiles);
+    setLanguage(detection.language);
+    setFramework(detection.framework);
+  };
+
+  const selectUploadedFileByPath = (path: string) => {
+    const idx = uploadedFiles.findIndex((f) => f.name === path);
+    if (idx >= 0) selectUploadedFile(idx);
   };
 
   const fetchGithubFile = async () => {
@@ -399,7 +619,7 @@ export default function ScannerPage() {
               if (!res.ok) return null;
               const text = await res.text();
               return {
-                name: f.path.split("/").pop() || f.path,
+                name: f.path,
                 content: text,
                 size: text.length,
               };
@@ -414,26 +634,15 @@ export default function ScannerPage() {
           throw new Error("Could not fetch any files from the repository");
         }
 
+        const initialIdx = pickPrimaryFileIndex(newFiles);
         setUploadedFiles(newFiles);
-        setActiveFileIdx(0);
-        setCode(newFiles[0].content);
-        setFileName(newFiles[0].name);
+        setActiveFileIdx(initialIdx);
+        setCode(newFiles[initialIdx].content);
+        setFileName(newFiles[initialIdx].name);
         setProjectName(`${owner}/${repo}`);
-        const ext = newFiles[0].name.split(".").pop()?.toLowerCase();
-        const langMap: Record<string, string> = {
-          java: "Java",
-          js: "JavaScript",
-          jsx: "JavaScript",
-          ts: "TypeScript",
-          tsx: "TypeScript",
-          py: "Python",
-          c: "C/C++",
-          cpp: "C/C++",
-          go: "Go",
-          rs: "Rust",
-          php: "PHP",
-        };
-        if (ext && langMap[ext]) setLanguage(langMap[ext]);
+        const detection = autoDetectFromFile(newFiles[initialIdx], newFiles);
+        setLanguage(detection.language);
+        setFramework(detection.framework);
       } else {
         // Single file URL (blob/raw)
         if (rawUrl.includes("github.com") && rawUrl.includes("/blob/")) {
@@ -445,25 +654,14 @@ export default function ScannerPage() {
         if (!res.ok) throw new Error("Failed to fetch");
         const text = await res.text();
         const name = rawUrl.split("/").pop() || "file.txt";
+        const singleFile = { name, content: text, size: text.length };
         setCode(text);
         setFileName(name);
-        setUploadedFiles([{ name, content: text, size: text.length }]);
+        setUploadedFiles([singleFile]);
         setActiveFileIdx(0);
-        const ext = name.split(".").pop()?.toLowerCase();
-        const langMap: Record<string, string> = {
-          java: "Java",
-          js: "JavaScript",
-          jsx: "JavaScript",
-          ts: "TypeScript",
-          tsx: "TypeScript",
-          py: "Python",
-          c: "C/C++",
-          cpp: "C/C++",
-          go: "Go",
-          rs: "Rust",
-          php: "PHP",
-        };
-        if (ext && langMap[ext]) setLanguage(langMap[ext]);
+        const detection = autoDetectFromFile(singleFile, [singleFile]);
+        setLanguage(detection.language);
+        setFramework(detection.framework);
       }
     } catch (err) {
       setGithubError(
@@ -479,28 +677,134 @@ export default function ScannerPage() {
   const handleScan = async () => {
     setLoading(true);
     setResult(null);
+    setLastScanContext(null);
     setActiveCategory("all");
+
+    let scanLanguage = language;
+    let scanFramework = framework;
+    const effectiveFileName = fileName || `Untitled.${getExtension(language)}`;
+    const hasProjectFiles = uploadedFiles.length > 0;
+    const shouldScanProject = scanScope === "project" && hasProjectFiles;
+    const scanFiles = shouldScanProject
+      ? uploadedFiles.map((f) => ({ name: f.name, content: f.content }))
+      : undefined;
+    const scannedFilesCount = shouldScanProject ? uploadedFiles.length : 1;
+    const effectiveScope: ScanScope = shouldScanProject ? "project" : "file";
+
+    if (inputMode === "editor" && code.trim()) {
+      const editorFile: UploadedFile = {
+        name: effectiveFileName,
+        content: code,
+        size: code.length,
+      };
+      const detection = autoDetectFromFile(editorFile, [editorFile]);
+      scanLanguage = detection.language;
+      scanFramework = detection.framework;
+      setLanguage(scanLanguage);
+      setFramework(scanFramework);
+    }
+
+    // Extract config files for version checking
+    const CONFIG_FILE_NAMES = [
+      "package.json",
+      "requirements.txt",
+      "pyproject.toml",
+      "gemfile",
+      "pom.xml",
+    ];
+    const configFiles = uploadedFiles
+      .filter((f) =>
+        CONFIG_FILE_NAMES.some((cf) => {
+          const lowerName = f.name.toLowerCase();
+          const lowerBaseName = getBaseName(f.name).toLowerCase();
+          const expected = cf.toLowerCase();
+          return lowerName === expected || lowerBaseName === expected;
+        }),
+      )
+      .map((f) => ({
+        fileName: f.name,
+        content: f.content,
+      }));
+
+    // Store GitHub URL for linking issues
+    if (githubUrl) {
+      setStoredGithubUrl(githubUrl);
+    }
+
     const res = await fetch("/api/scan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         code,
         projectName: projectName || "Untitled Project",
-        fileName: fileName || `Untitled.${getExtension(language)}`,
-        language,
-        framework: framework === "None" ? undefined : framework,
+        fileName: effectiveFileName,
+        language: scanLanguage,
+        framework: scanFramework === "None" ? undefined : scanFramework,
         analysisMode,
+        scanScope: effectiveScope,
+        files: scanFiles,
+        configFiles: configFiles.length > 0 ? configFiles : undefined,
       }),
     });
     const data = await res.json();
+    if (res.ok) {
+      setLastScanContext({
+        language: scanLanguage,
+        framework: scanFramework,
+        analysisMode,
+        fileName: effectiveFileName,
+        scanScope: effectiveScope,
+        scannedFilesCount,
+      });
+    }
     setResult(data.scan);
     setLoading(false);
   };
+
+  const formatLangFramework = (lang: string, fw: string) =>
+    fw !== "None" ? `${lang} / ${fw}` : lang;
 
   const handleCopy = (text: string, id: string) => {
     navigator.clipboard.writeText(text);
     setCopiedId(id);
     setTimeout(() => setCopiedId(null), 1500);
+  };
+
+  const handleIssueStatusChange = async (
+    issueId: string,
+    newStatus: string,
+  ) => {
+    try {
+      const response = await fetch(`/api/issues/${issueId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: newStatus }),
+      });
+
+      if (response.ok) {
+        setIssueStatuses((prev) => ({
+          ...prev,
+          [issueId]: newStatus,
+        }));
+      }
+    } catch (error) {
+      console.error("Failed to update issue status:", error);
+    }
+  };
+
+  const getIssueStatus = (issueId: string, defaultStatus?: string): string => {
+    return issueStatuses[issueId] || defaultStatus || "OPEN";
+  };
+
+  const getStatusBadgeClass = (status: string): string => {
+    switch (status) {
+      case "FIXED":
+        return styles.statusFixed;
+      case "IGNORED":
+        return styles.statusIgnored;
+      default:
+        return styles.statusOpen;
+    }
   };
 
   const getExtension = (lang: string) => {
@@ -531,6 +835,92 @@ export default function ScannerPage() {
     return styles.severityLow;
   };
 
+  const getGithubFileLink = (
+    fileName: string,
+    lineNumber: number,
+  ): string | null => {
+    if (!storedGithubUrl) return null;
+
+    let repoUrl = storedGithubUrl.trim();
+    if (repoUrl.endsWith("/")) {
+      repoUrl = repoUrl.slice(0, -1);
+    }
+
+    // Handle both .git and non-.git URLs
+    if (repoUrl.endsWith(".git")) {
+      repoUrl = repoUrl.slice(0, -4);
+    }
+
+    // Extract owner/repo from URL
+    const match = repoUrl.match(/github\.com\/([^\/]+)\/([^\/]+)/);
+    if (!match) return null;
+
+    const [, owner, repo] = match;
+    const branch = "main"; // Default to main, could be configurable
+    const filePath = fileName.startsWith("/") ? fileName : `/${fileName}`;
+
+    return `https://github.com/${owner}/${repo}/blob/${branch}${filePath}#L${lineNumber}`;
+  };
+
+  const buildFileTree = (): FileNode[] => {
+    if (uploadedFiles.length === 0) return [];
+
+    type MutableNode = FileNode & {
+      childrenMap?: Record<string, MutableNode>;
+    };
+
+    const root: Record<string, MutableNode> = {};
+
+    for (const file of uploadedFiles) {
+      const parts = file.name.split("/");
+      let current = root;
+      const pathParts: string[] = [];
+
+      for (let i = 0; i < parts.length; i++) {
+        const part = parts[i];
+        const isDir = i < parts.length - 1;
+        pathParts.push(part);
+        const fullPath = pathParts.join("/");
+
+        if (!current[part]) {
+          current[part] = {
+            name: part,
+            path: fullPath,
+            isDir,
+            children: undefined,
+            childrenMap: isDir ? {} : undefined,
+          };
+        }
+
+        if (isDir) {
+          if (!current[part].childrenMap) {
+            current[part].childrenMap = {};
+          }
+          current = current[part].childrenMap;
+        }
+      }
+    }
+
+    const processNode = (node: MutableNode): FileNode => {
+      if (node.childrenMap && Object.keys(node.childrenMap).length > 0) {
+        return {
+          name: node.name,
+          path: node.path,
+          isDir: true,
+          children: Object.values(node.childrenMap).map(processNode),
+        };
+      }
+
+      return {
+        name: node.name,
+        path: node.path,
+        isDir: node.isDir,
+      };
+    };
+
+    return Object.values(root).map(processNode);
+  };
+
   // Compute category counts
   const categoryCounts: Record<string, number> = {};
   const severityCounts: Record<string, number> = {};
@@ -554,7 +944,9 @@ export default function ScannerPage() {
         <span className={styles.editorTitle}>
           {fileName || `untitled.${getExtension(language)}`}
         </span>
-        <span className={styles.editorLang}>{language}</span>
+        <span className={styles.editorLang}>
+          {formatLangFramework(language, framework)}
+        </span>
         <button
           type="button"
           className={styles.fullscreenBtn}
@@ -643,6 +1035,17 @@ export default function ScannerPage() {
                   {f}
                 </option>
               ))}
+            </select>
+          </div>
+          <div className={styles.configField}>
+            <label className={styles.configLabel}>Scan Scope</label>
+            <select
+              className={styles.select}
+              value={scanScope}
+              onChange={(e) => setScanScope(e.target.value as ScanScope)}
+            >
+              <option value="file">Selected File</option>
+              <option value="project">Whole Project</option>
             </select>
           </div>
         </div>
@@ -790,6 +1193,10 @@ export default function ScannerPage() {
                   </button>
                 ))}
               </div>
+              <FileTree
+                files={buildFileTree()}
+                onFileSelect={selectUploadedFileByPath}
+              />
             </div>
           )}
           {code && (
@@ -803,7 +1210,9 @@ export default function ScannerPage() {
                 <span className={styles.editorTitle}>
                   {fileName || "Uploaded file"}
                 </span>
-                <span className={styles.editorLang}>{language}</span>
+                <span className={styles.editorLang}>
+                  {formatLangFramework(language, framework)}
+                </span>
               </div>
               <CodeEditor
                 value={code}
@@ -856,6 +1265,12 @@ export default function ScannerPage() {
             Paste a GitHub repository URL (e.g. https://github.com/user/repo) to
             scan the whole project, or a single file URL
           </p>
+          {uploadedFiles.length > 0 && (
+            <FileTree
+              files={buildFileTree()}
+              onFileSelect={selectUploadedFileByPath}
+            />
+          )}
           {code && (
             <div className={styles.editorSection}>
               <div className={styles.editorHeader}>
@@ -867,7 +1282,9 @@ export default function ScannerPage() {
                 <span className={styles.editorTitle}>
                   {fileName || "Fetched file"}
                 </span>
-                <span className={styles.editorLang}>{language}</span>
+                <span className={styles.editorLang}>
+                  {formatLangFramework(language, framework)}
+                </span>
               </div>
               <CodeEditor
                 value={code}
@@ -915,13 +1332,68 @@ export default function ScannerPage() {
             </span>
             <span>·</span>
             <span>
-              {language}
-              {framework !== "None" ? ` / ${framework}` : ""}
+              {formatLangFramework(
+                lastScanContext?.language || language,
+                lastScanContext?.framework || framework,
+              )}
             </span>
             <span>·</span>
             <span>
-              {ANALYSIS_MODES.find((m) => m.id === analysisMode)?.label}
+              {
+                ANALYSIS_MODES.find(
+                  (m) =>
+                    m.id === (lastScanContext?.analysisMode || analysisMode),
+                )?.label
+              }
             </span>
+            <span>·</span>
+            <span>
+              {(lastScanContext?.scanScope || scanScope) === "project"
+                ? `Whole project (${lastScanContext?.scannedFilesCount || uploadedFiles.length} files)`
+                : "Selected file"}
+            </span>
+          </div>
+
+          {/* Export buttons */}
+          <div className={styles.exportButtons}>
+            <button
+              className={styles.exportBtn}
+              onClick={() =>
+                downloadCSV({
+                  id: result.id,
+                  projectName: result.projectName,
+                  securityScore: result.securityScore,
+                  analysisMode: (
+                    lastScanContext?.analysisMode || analysisMode
+                  ).toUpperCase(),
+                  createdAt: result.createdAt,
+                  issues: result.issues,
+                })
+              }
+              title="Export as CSV"
+            >
+              <IconClipboard style={{ width: 16, height: 16 }} />
+              CSV
+            </button>
+            <button
+              className={styles.exportBtn}
+              onClick={() =>
+                downloadPDF({
+                  id: result.id,
+                  projectName: result.projectName,
+                  securityScore: result.securityScore,
+                  analysisMode: (
+                    lastScanContext?.analysisMode || analysisMode
+                  ).toUpperCase(),
+                  createdAt: result.createdAt,
+                  issues: result.issues,
+                })
+              }
+              title="Export as PDF"
+            >
+              <IconFile style={{ width: 16, height: 16 }} />
+              PDF
+            </button>
           </div>
 
           {/* Severity summary */}
@@ -1104,6 +1576,19 @@ export default function ScannerPage() {
                                   >
                                     {issue.severity}
                                   </span>
+                                  <span
+                                    className={`${styles.statusBadge} ${getStatusBadgeClass(getIssueStatus(issue.id, issue.status))}`}
+                                  >
+                                    {getIssueStatus(issue.id, issue.status) ===
+                                    "FIXED"
+                                      ? "✓"
+                                      : getIssueStatus(
+                                            issue.id,
+                                            issue.status,
+                                          ) === "IGNORED"
+                                        ? "⊘"
+                                        : ""}
+                                  </span>
                                   <span className={styles.issueRowLocation}>
                                     L{issue.lineNumber}
                                   </span>
@@ -1113,6 +1598,26 @@ export default function ScannerPage() {
                                     <p className={styles.issueLocation}>
                                       {issue.fileName} · Line {issue.lineNumber}
                                     </p>
+                                    {(() => {
+                                      const ghLink = getGithubFileLink(
+                                        issue.fileName,
+                                        issue.lineNumber,
+                                      );
+                                      return ghLink ? (
+                                        <a
+                                          href={ghLink}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          className={styles.ghLinkBtn}
+                                          title="View in GitHub"
+                                        >
+                                          <IconGithub
+                                            style={{ width: 14, height: 14 }}
+                                          />
+                                          View in GitHub
+                                        </a>
+                                      ) : null;
+                                    })()}
                                     <div className={styles.codeBlock}>
                                       <pre>{issue.snippet}</pre>
                                     </div>
@@ -1148,6 +1653,48 @@ export default function ScannerPage() {
                                         </button>
                                       </>
                                     )}
+                                    {/* Status control buttons */}
+                                    <div className={styles.issueStatusControls}>
+                                      <span className={styles.statusLabel}>
+                                        Mark as:
+                                      </span>
+                                      <button
+                                        type="button"
+                                        className={`${styles.statusBtn} ${getIssueStatus(issue.id, issue.status) === "OPEN" ? styles.statusBtnActive : ""}`}
+                                        onClick={() =>
+                                          handleIssueStatusChange(
+                                            issue.id,
+                                            "OPEN",
+                                          )
+                                        }
+                                      >
+                                        Open
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className={`${styles.statusBtn} ${getIssueStatus(issue.id, issue.status) === "FIXED" ? styles.statusBtnActive : ""}`}
+                                        onClick={() =>
+                                          handleIssueStatusChange(
+                                            issue.id,
+                                            "FIXED",
+                                          )
+                                        }
+                                      >
+                                        ✓ Fixed
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className={`${styles.statusBtn} ${getIssueStatus(issue.id, issue.status) === "IGNORED" ? styles.statusBtnActive : ""}`}
+                                        onClick={() =>
+                                          handleIssueStatusChange(
+                                            issue.id,
+                                            "IGNORED",
+                                          )
+                                        }
+                                      >
+                                        ⊘ Ignored
+                                      </button>
+                                    </div>
                                   </div>
                                 )}
                               </div>

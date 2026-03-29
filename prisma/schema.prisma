@@ -24,27 +24,41 @@ model User {
 }
 
 model Scan {
-  id            String   @id @default(uuid())
-  projectName   String
-  status        String   @default("COMPLETED")
-  securityScore Int      @default(100)
-  createdAt     DateTime @default(now())
-  userId        String?
-  user          User?    @relation(fields: [userId], references: [id])
-  issues        Issue[]
+  id              String         @id @default(uuid())
+  projectName     String
+  status          String         @default("COMPLETED")
+  analysisMode    String         @default("STANDARD")
+  securityScore   Int            @default(100)
+  createdAt       DateTime       @default(now())
+  userId          String?
+  user            User?          @relation(fields: [userId], references: [id])
+  issues          Issue[]
+  versionScans    VersionScan[]
 }
 
 model Issue {
-  id             String  @id @default(uuid())
+  id             String    @id @default(uuid())
   scanId         String
-  scan           Scan    @relation(fields: [scanId], references: [id])
+  scan           Scan      @relation(fields: [scanId], references: [id])
   fileName       String
   lineNumber     Int
   snippet        String
   issueType      String
   severity       String
-  category       String  @default("security")
-  description    String  @default("")
+  category       String    @default("security")
+  description    String    @default("")
   aiExplanation  String?
   aiFixSnippet   String?
+  status         String    @default("OPEN")
+  statusUpdatedAt DateTime? @updatedAt
+}
+
+model VersionScan {
+  id              String   @id @default(uuid())
+  scanId          String
+  scan            Scan     @relation(fields: [scanId], references: [id])
+  fileType        String
+  fileName        String
+  vulnerabilities String
+  createdAt       DateTime @default(now())
 }

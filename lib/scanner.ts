@@ -1,4 +1,5 @@
 import Groq from "groq-sdk";
+import { parseConfigFile, ParsedDependency } from "./versionParser";
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
@@ -637,10 +638,17 @@ export async function analyzeCode(
   const seenLines = new Set<string>();
 
   // Determine which rules to run based on analysis mode
-  const rulesToRun =
-    analysisMode === "quick"
-      ? [...SECURITY_RULES, ...PERFORMANCE_RULES, ...ERROR_HANDLING_RULES]
-      : ALL_RULES;
+  let rulesToRun: Rule[];
+  if (analysisMode === "quick") {
+    // Quick: Security only
+    rulesToRun = SECURITY_RULES;
+  } else if (analysisMode === "standard") {
+    // Standard: Security + Performance
+    rulesToRun = [...SECURITY_RULES, ...PERFORMANCE_RULES];
+  } else {
+    // Deep: All categories
+    rulesToRun = ALL_RULES;
+  }
 
   // 1. Static regex pass on comment-stripped lines (all modes)
   for (let i = 0; i < strippedLines.length; i++) {
@@ -907,4 +915,91 @@ Be thorough. Find at least 3 issues if the code has any problems. If the code is
   );
 
   return findings;
+}
+
+/**
+ * Export interface for version vulnerabilities
+ */
+export interface VersionVulnerability {
+  package: string;
+  version: string;
+  cveIds: string[];
+  severity: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "NONE";
+  description: string;
+  recommendation?: string;
+}
+
+/**
+ * Check dependencies for known vulnerabilities using Groq
+ */
+export async function checkVersionVulnerabilities(
+  dependencies: ParsedDependency[],
+): Promise<VersionVulnerability[]> {
+  if (dependencies.length === 0) {
+    return [];
+  }
+
+  try {
+    // Batch dependencies for efficiency (limit Groq token usage)
+    const batchSize = 20;
+    const allVulnerabilities: VersionVulnerability[] = [];
+
+    for (let i = 0; i < dependencies.length; i += batchSize) {
+      const batch = dependencies.slice(
+        i,
+        Math.min(i + batchSize, dependencies.length),
+      );
+
+      const prompt = `You are a security expert. Analyze these package versions for known vulnerabilities.
+      
+For each package, check if the specific version has known CVEs, security issues, or deprecation warnings.
+
+Packages to check:
+${batch.map((d) => `- ${d.package} (${d.version})`).join("\n")}
+
+Return a JSON object with key "vulnerabilities" containing an array of:
+{
+  "package": "package-name",
+  "version": "version-string", 
+  "severity": "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "NONE",
+  "cveIds": ["CVE-2023-1234", ...] or [],
+  "description": "Brief description of the vulnerability or 'No known vulnerabilities'",
+  "recommendation": "Upgrade to version X.X.X or 'Keep updated'"
+}
+
+If a package has no known vulnerabilities, set severity to "NONE" and cveIds to empty array.
+Return a result for EVERY package provided, even if no vulnerabilities found.`;
+
+      try {
+        const completion = await groq.chat.completions.create({
+          messages: [{ role: "user", content: prompt }],
+          model: "llama-3.3-70b-versatile",
+          response_format: { type: "json_object" },
+        });
+
+        const response = JSON.parse(
+          completion.choices[0]?.message?.content || '{"vulnerabilities":[]}',
+        );
+
+        if (
+          response.vulnerabilities &&
+          Array.isArray(response.vulnerabilities)
+        ) {
+          // Filter out packages with no vulnerabilities
+          const vulnerabilities = response.vulnerabilities.filter(
+            (v: VersionVulnerability) => v.severity !== "NONE",
+          );
+          allVulnerabilities.push(...vulnerabilities);
+        }
+      } catch (e) {
+        console.error("Groq version check error for batch", e);
+        // Continue with next batch even if one fails
+      }
+    }
+
+    return allVulnerabilities;
+  } catch (error) {
+    console.error("Version vulnerability check failed", error);
+    return [];
+  }
 }

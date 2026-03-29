@@ -424,6 +424,29 @@
   font-family: var(--font-mono);
 }
 
+/* ── GitHub Link Button ── */
+.ghLinkBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.75rem;
+  padding: 0.35rem 0.65rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--accent);
+  background: rgba(99, 102, 241, 0.08);
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  border-radius: var(--radius-sm);
+  text-decoration: none;
+  transition: all 0.2s;
+}
+
+.ghLinkBtn:hover {
+  background: rgba(99, 102, 241, 0.12);
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
 .issueExplanation {
   font-size: 0.875rem;
   color: var(--text-secondary);
@@ -696,6 +719,85 @@
   border-radius: var(--radius-sm);
   cursor: pointer;
   transition: all 0.2s;
+}
+
+.copyBtn:hover {
+  color: var(--text-primary);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+/* ── Issue Status ── */
+.statusBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  border-radius: 3px;
+  margin: 0 4px;
+}
+
+.statusOpen {
+  background: rgba(99, 102, 241, 0.15);
+  color: var(--accent);
+}
+
+.statusFixed {
+  background: rgba(34, 197, 94, 0.15);
+  color: var(--success);
+}
+
+.statusIgnored {
+  background: rgba(156, 163, 175, 0.15);
+  color: #9ca3af;
+}
+
+.issueStatusControls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border-color);
+}
+
+.statusLabel {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-right: 0.25rem;
+}
+
+.statusBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.35rem 0.6rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  font-family: var(--font-sans);
+  color: var(--text-muted);
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.statusBtn:hover {
+  color: var(--text-primary);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.statusBtnActive {
+  color: var(--text-primary);
+  border-color: var(--accent);
+  background: rgba(99, 102, 241, 0.08);
 }
 
 .copyBtn:hover {
@@ -985,6 +1087,37 @@
   font-size: 0.72rem;
   color: var(--text-muted);
   margin: 0;
+}
+
+/* ── Export Buttons ── */
+.exportButtons {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--border-color);
+  margin-bottom: 1rem;
+}
+
+.exportBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 0.85rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  font-family: var(--font-sans);
+  color: var(--text-secondary);
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.exportBtn:hover {
+  color: var(--text-primary);
+  border-color: var(--accent);
+  background: rgba(99, 102, 241, 0.05);
 }
 
 @media (max-width: 640px) {
